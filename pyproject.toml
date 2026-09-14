@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telewave"
+version = "1.0.0"
+description = "Hybrid Wavelet + Deep Learning Framework for Climate, Weather & Rainfall Forecasting"
+readme = "README.md"
+authors = [{ name = "Adeola Johnson", email = "johnsamxy@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+telewave = "climatewave.cli:main"
+climatewave = "climatewave.cli:main"

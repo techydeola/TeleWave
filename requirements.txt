@@ -1,0 +1,10 @@
+# TeleWave Dependencies
+# Note: Core Wavelet MRA engine, models, and CLI run with ZERO external dependencies using Python Standard Library!
+
+# Optional scientific acceleration packages:
+# torch>=2.0.0
+# numpy>=1.24.0
+# scipy>=1.10.0
+# PyWavelets>=1.4.0
+# pandas>=2.0.0
+# matplotlib>=3.7.0
