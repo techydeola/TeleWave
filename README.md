@@ -142,7 +142,7 @@ python3 -m climatewave.cli spectral
 ```
 
 ### 2. Guided Real-World Scenario Walkthroughs
-Run terminal walkthroughs evaluating anomaly detection and forecasting during historical events:
+Run terminal walkthroughs evaluating 2-sigma wavelet D1 anomaly thresholding and walk-forward forecasting across historical climate events:
 ```bash
 # 1982-83 El Niño Sahel Drought
 python3 run_scenario.py 1983_drought
@@ -209,7 +209,7 @@ TeleWave/
 │   │   └── live_fetcher.py     # NOAA CPC/NCEI & ERA5 live HTTP ingestion
 │   ├── models/
 │   │   ├── base.py             # Abstract forecaster interface
-│   │   ├── wavelet_lstm.py     # Multi-Branch Wavelet-Reservoir model
+│   │   ├── wavelet_lstm.py     # Wavelet-Reservoir hybrid model
 │   │   ├── baseline_lstm.py    # Recurrent reservoir baseline
 │   │   └── statistical.py      # Persistence & seasonal climatology baselines
 │   ├── evaluation/
