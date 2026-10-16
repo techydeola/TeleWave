@@ -1,21 +1,21 @@
 # TeleWave
 
-> Hybrid Wavelet + Deep Learning Framework for Climate, Weather & Rainfall Forecasting
+> Wavelet decomposition and reservoir-style neural networks for monthly rainfall forecasting, in pure Python
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/Tests-48%20Passing-brightgreen.svg)]()
-[![Zero External Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External%20Req-purple.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-48%20Passing-brightgreen.svg)](https://github.com/techydeola/TeleWave/actions)
+[![Zero External Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External%20Req-purple.svg)](requirements.txt)
 
 ---
 
 ## Overview
 
-TeleWave is a Python framework that combines Multiresolution Wavelet Transforms (Discrete Wavelet Transform / Multiresolution Analysis) with recurrent deep learning models to forecast meteorological and hydrological time series.
+TeleWave is a Python framework that combines Multiresolution Wavelet Transforms (Discrete Wavelet Transform / Multiresolution Analysis) with recurrent reservoir-style neural architectures to forecast monthly meteorological time series.
 
 Meteorological time series present difficulties for standard neural network architectures because observed rainfall superimposes processes operating across multiple distinct timescales: multi-decadal trends, 12-month seasonal cycles, and high-frequency convective storm events.
 
-TeleWave decomposes input rainfall series into Approximation ($A_J$) and Detail ($D_1 \dots D_J$) sub-bands via discrete wavelet filtering. This separates lower-frequency seasonal baselines from high-frequency sub-seasonal oscillations before feature extraction and forecasting.
+TeleWave decomposes input rainfall series into Approximation ($A_J$) and Detail ($D_1 \dots D_J$) sub-bands via discrete wavelet filtering. This separates lower-frequency seasonal baselines from high-frequency sub-seasonal oscillations before feature extraction. The recurrent models implemented here operate as reservoir-style networks: recurrent LSTM hidden states are initialized and held fixed, with multi-scale wavelet representations and lag features projected to target horizons using closed-form regularized ridge regression.
 
 ---
 
@@ -35,7 +35,7 @@ Orthogonal wavelet filters supported include Haar, Daubechies (`db2`, `db4`), an
 
 $$g[k] = (-1)^k h[K - 1 - k], \quad \sum_{k=0}^{K-1} h[k] = \sqrt{2}, \quad \sum_{k=0}^{K-1} h[k]^2 = 1.0$$
 
-### 2. Wavelet Feature Extraction and Hybrid Forecasting
+### 2. Wavelet Feature Extraction and Reservoir Forecasting
 
 The hybrid model (`WaveletLSTMForecaster`) extracts multi-scale features from sliding windows of length $T$:
 1. Raw target lags: $x(t-T+1), \dots, x(t)$.
@@ -52,35 +52,38 @@ where $\mathbf{w}$ is computed via Gauss-Jordan elimination with partial pivotin
 
 ## Comparative Evaluation Results
 
-Evaluation conducted on the Nigeria monthly precipitation series (1961–2022) using 12-month lookback windows to predict a 1-month-ahead horizon ($T=12, H=1$):
+Evaluation conducted on the Nigeria monthly precipitation series (61 years: January 1961 to December 2021, 732 monthly observations) using 12-month lookback windows to predict a 1-month-ahead horizon ($T=12, H=1$):
 
 | Model Architecture | RMSE (scaled) | MAE (scaled) | $R^2$ Score | Nash-Sutcliffe (NSE) | Peak Capture (PCI) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | Seasonal Climatology | 0.0962 | 0.0671 | 0.6714 | 0.6714 | 0.7618 |
-| Wavelet-LSTM (Hybrid) | 0.1110 | 0.0740 | 0.5625 | 0.5625 | 0.6453 |
-| Standard LSTM | 0.1136 | 0.0772 | 0.5420 | 0.5420 | 0.6424 |
+| Wavelet-LSTM (Reservoir) | 0.1110 | 0.0740 | 0.5625 | 0.5625 | 0.6453 |
+| Standard LSTM (Reservoir) | 0.1136 | 0.0772 | 0.5420 | 0.5420 | 0.6424 |
 | Persistence Baseline | 0.1582 | 0.1152 | 0.1122 | 0.1122 | 0.5777 |
 
-*Note on units:* In the standard training pipeline, target precipitation is normalized to $[0, 1]$ with `MinMaxScaler`. RMSE and MAE in the table above reflect this $[0, 1]$ scaled range. When inverse-transformed back to physical units (ERA5 equivalent mean daily precipitation rate in meters per day, $m/\text{day}$), the corresponding errors are:
+*Metric definitions and physical units:*
+- **Scaled vs. physical error:** In the training pipeline, target precipitation is normalized to $[0, 1]$ with `MinMaxScaler`. RMSE and MAE in the table above reflect this $[0, 1]$ scaled range. When inverse-transformed back to physical units (daily equivalent rate in millimetres per day, $\text{mm/day}$), the corresponding errors are:
 
-| Model Architecture | RMSE ($m/\text{day}$) | MAE ($m/\text{day}$) |
+| Model Architecture | RMSE ($\text{mm/day}$) | MAE ($\text{mm/day}$) |
 | :--- | :---: | :---: |
-| Seasonal Climatology | 0.0020 | 0.0014 |
-| Wavelet-LSTM (Hybrid) | 0.0023 | 0.0015 |
-| Standard LSTM | 0.0023 | 0.0016 |
-| Persistence Baseline | 0.0033 | 0.0024 |
+| Seasonal Climatology | 1.98 | 1.38 |
+| Wavelet-LSTM (Reservoir) | 2.28 | 1.52 |
+| Standard LSTM (Reservoir) | 2.33 | 1.59 |
+| Persistence Baseline | 3.25 | 2.37 |
 
-On this test split, the Wavelet-LSTM scored higher than the standard LSTM baseline and the persistence benchmark, but lower than the seasonal climatology baseline. Results come from a single dataset and a single train/test split, so they should not be read as general performance.
+- **Peak Capture Index (PCI):** Defined as $1 - \frac{1}{K}\sum_{i=1}^K \frac{|y_i - \hat{y}_i|}{|y_i| + 10^{-5}}$ evaluated exclusively over the top 10% highest precipitation months ($\text{percentile} \ge 90$). A value of 1.0 denotes exact prediction of extreme peaks, while lower values reflect under- or over-estimation of heavy rainfall anomalies.
+
+On this test split, the Wavelet-LSTM scored slightly higher than the standard LSTM baseline ($R^2$ of 0.5625 vs. 0.5420), a difference that a single run cannot separate from random variation, and both neural models scored lower than the seasonal climatology baseline ($R^2 = 0.6714$). Results come from a single dataset and a single train/test split, so they should not be read as general performance.
 
 ---
 
 ## Evaluation Details and Limitations
 
-- **Dataset and split:** Evaluated on `data/raw/nigeria_teleconnections_monthly_1961_2022.csv` (732 monthly observations, January 1961 to December 2021). Chronological train/test split with `train_ratio = 0.8` produces 576 training windows and 144 test windows (test period: 2010 to 2021).
+- **Dataset and split:** Evaluated on `data/raw/nigeria_teleconnections_monthly_1961_2022.csv` (contains 732 monthly observations spanning 61 complete years from January 1961 to December 2021; named `1961_2022` to reflect coverage ending at the start of 2022). A chronological train/test split with `train_ratio = 0.8` produces 576 training windows (1962–2009) and 144 test windows (2010–2021).
 - **Parameters:** Lookback window of 12 months, forecast horizon of 1 month, 20 training epochs, decomposition level $J=2$ with Daubechies 4 (`db4`) filter.
 - **Single run:** Results are from a single run with a fixed random seed (`seed = 42`), not averaged across multiple random initializations.
 - **Spatial and temporal resolution:** Data represents monthly aggregate rainfall at national spatial scale. It is not designed for flash flood early warning, thunderstorm prediction, or local/near-real-time nowcasting.
-- **Model implementation scope:** The LSTM implementations in this repository operate as reservoir-style networks with regularized closed-form readout layers rather than full backpropagation-through-time with Adam/SGD optimizers.
+- **Model implementation scope:** The "LSTM" models in this codebase operate as reservoir-style recurrent feature extractors with a closed-form ridge regression readout layer rather than backpropagation-through-time with gradient-based optimizers.
 - **Methodological limitations:** No rolling k-fold cross-validation or systematic hyperparameter search was conducted. The sample size (732 monthly steps) is relatively small for deep learning without strong inductive priors.
 
 ---
@@ -91,20 +94,21 @@ The `data/raw/` directory contains meteorological and teleconnection time series
 
 | File | Temporal Range | Description & Source |
 | :--- | :--- | :--- |
-| `nigeria_teleconnections_monthly_1961_2022.csv` | 1961–2021 (monthly, 732 rows) | Monthly precipitation (ERA5 reanalysis, ECMWF / Copernicus Open Access) paired with 6 climate indices: NINA 3.4, SOI, NAO (NOAA Climate Prediction Center - CPC), PDO (NOAA National Centers for Environmental Information - NCEI), AMM, and AMO (NOAA Physical Sciences Laboratory - PSL). |
+| `nigeria_teleconnections_monthly_1961_2022.csv` | 1961–2021 (monthly, 732 rows) | Monthly precipitation from ERA5 reanalysis paired with 6 climate indices: NINA 3.4, SOI, NAO (NOAA Climate Prediction Center - CPC), PDO (NOAA National Centers for Environmental Information - NCEI), AMM, and AMO (NOAA Physical Sciences Laboratory - PSL). |
 | `nigeria_teleconnections_monthly_extended.csv` | 1961–2026 (monthly, 788 rows) | Synchronized extension of the monthly dataset created via `LiveClimateDataFetcher` combining NOAA CPC/NCEI live index tables and Open-Meteo ERA5 archive reanalysis. |
 | `ondo_daily_meteorology_1991_2021.csv` | 1991–2021 (daily, 11,324 rows) | Surface meteorological observations for Ondo state centroid (ERA5 reanalysis): $10\text{ m}$ wind vectors (`u10`, `v10`), max/min $2\text{ m}$ temperature (`mx2t`, `mn2t`), and total precipitation (`tp`). |
 | `calabar_daily_meteorology_1991_2021.csv` | 1991–2021 (daily, 11,324 rows) | Surface meteorological observations for Calabar coastal station (ERA5 reanalysis), containing same variables as Ondo dataset. |
-| `harmattan_hourly_meteorology_2015_2020.csv` | 2015–2020 (hourly, 39,738 rows) | Hourly dry-season observations: temperature (`tmpc`), relative humidity (`relh`), wind speed (`sped`), and visibility (`vsby`). Derived from surface METAR station observations. |
+| `harmattan_hourly_meteorology_2015_2020.csv` | 2015–2020 (hourly, 39,738 rows) | Hourly dry-season surface observations: temperature (`tmpc`), relative humidity (`relh`), wind speed (`sped`), and visibility (`vsby`). Derived from Nigerian airport METAR weather reports archived by the Iowa Environmental Mesonet (IEM). |
 | `nigeria_multi_station_precipitation_monthly_1961_2022.csv` | 1961–2022 (monthly, 744 rows) | Multi-station monthly precipitation across 6 southern Nigerian states/cities (Lagos, Cross River, Port Harcourt, Delta, Calabar, Warri) from ERA5 reanalysis. |
 | `surface_energy_fluxes_era5_monthly.csv` | Monthly ERA5 records (744 rows) | ERA5 surface energy fluxes: sensible heat flux (`sshf`), latent heat flux (`slhf`), net solar radiation (`ssr`), thermal radiation (`str`), and $2\text{ m}$ dewpoint/temperature. |
 | `station_teleconnection_correlations.csv` | Summary table (24 locations) | Spatial correlation coefficients between station-level precipitation and teleconnection indices across Nigerian coordinates. |
 | `seasonal_trend_mann_kendall.csv` | Summary table (4 seasons) | Mann-Kendall non-parametric trend test results and Sen's slope estimates across seasons (JFM, AMJ, JAS, OND). |
 | `teleconnections_correlation_matrix.csv` | Summary table ($6 \times 6$) | Cross-correlation matrix between the 6 global teleconnection indices (NINA, AMM, SOI, PDO, NAO, AMO). |
 
-*License and terms:*
-- NOAA CPC, NCEI, and PSL datasets are US Government public domain products.
-- ERA5 reanalysis data is provided by ECMWF under Copernicus Programme license terms (free for research, commercial, and operational use with attribution).
+*Citations, licenses, and terms:*
+- **ERA5 Reanalysis:** Hersbach, H., et al. (2020). *The ERA5 global reanalysis*. Quarterly Journal of the Royal Meteorological Society, 146(730), 1999-2049. Provided by ECMWF under Copernicus Programme license terms (free for research, commercial, and operational use with attribution).
+- **NOAA Indices:** NOAA CPC, NCEI, and PSL datasets are US Government public domain products.
+- **METAR Data:** Surface airport weather observations collected under WMO standards and archived by the Iowa Environmental Mesonet (IEM, Iowa State University).
 
 ---
 
@@ -205,8 +209,8 @@ TeleWave/
 │   │   └── live_fetcher.py     # NOAA CPC/NCEI & ERA5 live HTTP ingestion
 │   ├── models/
 │   │   ├── base.py             # Abstract forecaster interface
-│   │   ├── wavelet_lstm.py     # Multi-Branch Wavelet-LSTM network
-│   │   ├── baseline_lstm.py    # Standard recurrent LSTM baseline
+│   │   ├── wavelet_lstm.py     # Multi-Branch Wavelet-Reservoir model
+│   │   ├── baseline_lstm.py    # Recurrent reservoir baseline
 │   │   └── statistical.py      # Persistence & seasonal climatology baselines
 │   ├── evaluation/
 │   │   ├── metrics.py          # RMSE, MAE, R², NSE, Peak Capture Index
