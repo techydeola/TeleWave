@@ -5,7 +5,8 @@ Combines Multiresolution Analysis (MRA) with dedicated sub-band recurrent networ
 
 import math
 import random
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
+import numpy as np
 from climatewave.models.base import BaseClimateForecaster
 from climatewave.models.baseline_lstm import BaselineLSTMForecaster, solve_ridge_regression
 from climatewave.wavelets.dwt import WaveletTransform
@@ -85,8 +86,8 @@ class WaveletLSTMForecaster(BaseClimateForecaster):
         # Solve optimal regularized multiresolution projection
         self.fusion_weights = solve_ridge_regression(H_mat, y_vec, lambda_reg=0.005)
 
-        preds = [sum(h_row[j] * self.fusion_weights[j] for j in range(len(self.fusion_weights))) for h_row in H_mat]
-        mse = sum((p - y) ** 2 for p, y in zip(preds, y_vec)) / len(y_vec)
+        preds = np.dot(H_mat, self.fusion_weights)
+        mse = float(np.mean((preds - y_vec) ** 2))
 
         self.is_fitted = True
         branches = [f"A{self.level}"] + [f"D{j}" for j in range(self.level, 0, -1)]
@@ -98,14 +99,10 @@ class WaveletLSTMForecaster(BaseClimateForecaster):
             "wavelet": self.wavelet_name,
         }
 
-    def predict(self, X: List[List[List[float]]]) -> List[List[float]]:
+    def predict(self, X: Union[List[List[List[float]]], np.ndarray]) -> List[List[float]]:
         if not self.is_fitted:
             raise ValueError("Model must be fitted before predict().")
 
-        preds = []
-        for seq in X:
-            feat = self._extract_wavelet_features(seq)
-            out_val = sum(feat[j] * self.fusion_weights[j] for j in range(len(self.fusion_weights)))
-            preds.append([out_val])
-
-        return preds
+        H_mat = [self._extract_wavelet_features(seq) for seq in X]
+        preds = np.dot(H_mat, self.fusion_weights)
+        return [[float(p)] for p in preds]

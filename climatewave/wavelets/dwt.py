@@ -1,101 +1,107 @@
 """
 Discrete Wavelet Transform (DWT), Inverse DWT (IDWT), and Multiresolution Analysis (MRA).
-Provides pure-Python numerical implementations with zero required external dependencies,
-ensuring perfect reconstruction and mathematical rigor (Parseval energy conservation).
+High-performance vectorized implementation using NumPy for dyadic filtering and multiresolution decomposition,
+guaranteeing mathematical equivalence and energy conservation.
 """
 
 import math
 from typing import List, Tuple, Dict, Any, Union
+import numpy as np
 from climatewave.wavelets.filters import get_wavelet_filters
 
 
-def convolve_downsample(signal: List[float], filter_kernel: List[float], step: int = 2) -> List[float]:
-    """1D convolution followed by dyadic downsampling (decimation by step)."""
-    N = len(signal)
-    K = len(filter_kernel)
-    out_len = (N + K - 1) // step
-    result = []
-
-    # Periodic boundary extension for energy conservation
-    extended = signal + signal[:K]
-    for i in range(0, N, step):
-        val = 0.0
-        for k in range(K):
-            idx = (i + k) % N
-            val += extended[idx] * filter_kernel[k]
-        result.append(val)
-    return result
+def convolve_downsample(
+    signal: Union[List[float], np.ndarray],
+    filter_kernel: Union[List[float], np.ndarray],
+    step: int = 2,
+) -> List[float]:
+    """1D circular convolution followed by dyadic downsampling (decimation by step) using NumPy."""
+    sig = np.asarray(signal, dtype=np.float64)
+    kernel = np.asarray(filter_kernel, dtype=np.float64)
+    N = len(sig)
+    K = len(kernel)
+    out_indices = np.arange(0, N, step)
+    gather_idx = (out_indices[:, None] + np.arange(K)[None, :]) % N
+    result = np.dot(sig[gather_idx], kernel)
+    return result.tolist()
 
 
-def upsample_convolve(coeffs: List[float], filter_kernel: List[float], target_len: int) -> List[float]:
-    """Dyadic upsampling (inserting zeros) followed by convolution."""
-    K = len(filter_kernel)
-    # Dyadically upsample
-    upsampled = []
-    for c in coeffs:
-        upsampled.append(c)
-        upsampled.append(0.0)
-
-    # Convolve with reconstruction filter
+def upsample_convolve(
+    coeffs: Union[List[float], np.ndarray],
+    filter_kernel: Union[List[float], np.ndarray],
+    target_len: int,
+) -> List[float]:
+    """Dyadic upsampling (inserting zeros) followed by convolution using NumPy."""
+    c = np.asarray(coeffs, dtype=np.float64)
+    kernel = np.asarray(filter_kernel, dtype=np.float64)
+    upsampled = np.zeros(len(c) * 2, dtype=np.float64)
+    upsampled[::2] = c
     N = len(upsampled)
-    result = [0.0] * target_len
-    for i in range(target_len):
-        val = 0.0
-        for k in range(K):
-            idx = (i - k) % N
-            val += upsampled[idx] * filter_kernel[k]
-        result[i] = val
-    return result
+    i_idx = np.arange(target_len)[:, None]
+    k_idx = np.arange(len(kernel))[None, :]
+    idx = (i_idx - k_idx) % N
+    result = np.dot(upsampled[idx], kernel)
+    return result.tolist()
 
 
 class WaveletTransform:
-    """Core multiresolution wavelet transform engine."""
+    """Core multiresolution wavelet transform engine using NumPy vectorization."""
 
     def __init__(self, wavelet: str = "db4"):
         self.wavelet_name = wavelet
-        self.h_dec, self.g_dec, self.h_rec, self.g_rec = get_wavelet_filters(wavelet)
+        h_dec, g_dec, h_rec, g_rec = get_wavelet_filters(wavelet)
+        self.h_dec = np.asarray(h_dec, dtype=np.float64)
+        self.g_dec = np.asarray(g_dec, dtype=np.float64)
+        self.h_rec = np.asarray(h_rec, dtype=np.float64)
+        self.g_rec = np.asarray(g_rec, dtype=np.float64)
 
-    def dwt_single_level(self, signal: List[float]) -> Tuple[List[float], List[float]]:
+    def dwt_single_level(self, signal: Union[List[float], np.ndarray]) -> Tuple[List[float], List[float]]:
         """Decomposes a 1D signal into approximation (cA) and detail (cD) coefficients."""
-        N = len(signal)
-        # Ensure even length
-        sig = list(signal)
+        sig = np.asarray(signal, dtype=np.float64)
+        # Ensure even length by repeating last element if odd
         if len(sig) % 2 != 0:
-            sig.append(sig[-1])
+            sig = np.append(sig, sig[-1])
 
+        N = len(sig)
         K = len(self.h_dec)
-        half_len = len(sig) // 2
-        cA = [0.0] * half_len
-        cD = [0.0] * half_len
+        half_len = N // 2
+        i_idx = np.arange(half_len)[:, None]
+        k_idx = np.arange(K)[None, :]
+        idx = (2 * i_idx + k_idx) % N
+        samples = sig[idx]
 
-        for i in range(half_len):
-            sum_a = 0.0
-            sum_d = 0.0
-            for k in range(K):
-                idx = (2 * i + k) % len(sig)
-                sum_a += sig[idx] * self.h_dec[k]
-                sum_d += sig[idx] * self.g_dec[k]
-            cA[i] = sum_a
-            cD[i] = sum_d
+        cA = np.dot(samples, self.h_dec)
+        cD = np.dot(samples, self.g_dec)
+        return cA.tolist(), cD.tolist()
 
-        return cA, cD
-
-    def idwt_single_level(self, cA: List[float], cD: List[float], target_len: int) -> List[float]:
+    def idwt_single_level(
+        self,
+        cA: Union[List[float], np.ndarray],
+        cD: Union[List[float], np.ndarray],
+        target_len: int,
+    ) -> List[float]:
         """Reconstructs 1D signal from approximation (cA) and detail (cD) coefficients."""
-        half_len = max(len(cA), len(cD))
+        cA_arr = np.asarray(cA, dtype=np.float64)
+        cD_arr = np.asarray(cD, dtype=np.float64)
+        half_len = max(len(cA_arr), len(cD_arr))
         K = len(self.h_rec)
-        rec = [0.0] * (half_len * 2)
+        M = half_len * 2
 
-        for i in range(half_len):
-            val_a = cA[i] if i < len(cA) else 0.0
-            val_d = cD[i] if i < len(cD) else 0.0
-            for k in range(K):
-                out_idx = (2 * i + k) % len(rec)
-                rec[out_idx] += val_a * self.h_rec[k] + val_d * self.g_rec[k]
+        val_a = np.zeros(half_len, dtype=np.float64)
+        val_d = np.zeros(half_len, dtype=np.float64)
+        val_a[: len(cA_arr)] = cA_arr
+        val_d[: len(cD_arr)] = cD_arr
 
-        return rec[:target_len]
+        terms = val_a[:, None] * self.h_rec[None, :] + val_d[:, None] * self.g_rec[None, :]
+        i_idx = np.arange(half_len)[:, None]
+        k_idx = np.arange(K)[None, :]
+        idx = (2 * i_idx + k_idx) % M
 
-    def wavedec(self, signal: List[float], level: int = 3) -> List[List[float]]:
+        rec = np.zeros(M, dtype=np.float64)
+        np.add.at(rec, idx.ravel(), terms.ravel())
+        return rec[:target_len].tolist()
+
+    def wavedec(self, signal: Union[List[float], np.ndarray], level: int = 3) -> List[List[float]]:
         """
         Multilevel 1D Discrete Wavelet Decomposition.
         Returns coefficients list: [cA_J, cD_J, cD_{J-1}, ..., cD_1].
@@ -109,7 +115,7 @@ class WaveletTransform:
             coeffs.append(cD)
             current_a = cA
         coeffs.append(current_a)
-        # Return in standard PyWavelets order: [cA_n, cD_n, cD_n-1, ..., cD_1]
+        # Return in standard order: [cA_n, cD_n, cD_n-1, ..., cD_1]
         return list(reversed(coeffs))
 
     def waverec(self, coeffs: List[List[float]], original_len: int) -> List[float]:
@@ -122,7 +128,7 @@ class WaveletTransform:
             current_a = self.idwt_single_level(current_a, cD, target_len)
         return current_a[:original_len]
 
-    def mra(self, signal: List[float], level: int = 3) -> Dict[str, List[float]]:
+    def mra(self, signal: Union[List[float], np.ndarray], level: int = 3) -> Dict[str, List[float]]:
         """
         Multiresolution Analysis (MRA) Decomposition:
         Decomposes the raw signal into zero-phase additive components of equal length:
@@ -149,17 +155,19 @@ class WaveletTransform:
 
         return components
 
-    def energy_distribution(self, signal: List[float], level: int = 3) -> Dict[str, float]:
+    def energy_distribution(self, signal: Union[List[float], np.ndarray], level: int = 3) -> Dict[str, float]:
         """
         Computes the relative wavelet energy percentage across decomposed frequency bands.
         """
+        sig_arr = np.asarray(signal, dtype=np.float64)
         mra_dict = self.mra(signal, level=level)
-        total_energy = sum(x ** 2 for x in signal)
-        if total_energy == 0:
+        total_energy = float(np.sum(sig_arr ** 2))
+        if total_energy == 0.0:
             total_energy = 1.0
 
         energies = {}
         for k, comp in mra_dict.items():
-            comp_energy = sum(x ** 2 for x in comp)
+            comp_arr = np.asarray(comp, dtype=np.float64)
+            comp_energy = float(np.sum(comp_arr ** 2))
             energies[k] = round((comp_energy / total_energy) * 100.0, 2)
         return energies

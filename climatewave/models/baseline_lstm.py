@@ -1,11 +1,12 @@
 """
 Standard Recurrent LSTM baseline forecaster for raw meteorological time-series.
-Features recurrent hidden memory cells with regularized linear projection.
+Features recurrent hidden memory cells with regularized linear projection, vectorized with NumPy.
 """
 
 import math
 import random
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union, Optional
+import numpy as np
 from climatewave.models.base import BaseClimateForecaster
 
 
@@ -19,51 +20,30 @@ def tanh(x: float) -> float:
     return math.tanh(x_clipped)
 
 
-def solve_ridge_regression(X_mat: List[List[float]], y_vec: List[float], lambda_reg: float = 1e-4) -> List[float]:
-    """Solves w = (X^T X + lambda*I)^(-1) X^T y using Gaussian elimination."""
-    n_samples = len(X_mat)
-    n_features = len(X_mat[0])
+def solve_ridge_regression(
+    X_mat: Union[List[List[float]], np.ndarray],
+    y_vec: Union[List[float], np.ndarray],
+    lambda_reg: float = 1e-4,
+) -> List[float]:
+    """
+    Solves w = (X^T X + lambda*I)^(-1) X^T y using high-performance NumPy linear algebra.
+    """
+    X = np.asarray(X_mat, dtype=np.float64)
+    y = np.asarray(y_vec, dtype=np.float64)
+    n_features = X.shape[1]
 
-    # Compute XtX
-    XtX = [[0.0] * n_features for _ in range(n_features)]
-    for i in range(n_features):
-        for j in range(n_features):
-            s = sum(X_mat[k][i] * X_mat[k][j] for k in range(n_samples))
-            if i == j:
-                s += lambda_reg
-            XtX[i][j] = s
+    XtX = np.dot(X.T, X)
+    XtX.flat[:: n_features + 1] += lambda_reg
+    Xty = np.dot(X.T, y)
 
-    # Compute Xty
-    Xty = [sum(X_mat[k][i] * y_vec[k] for k in range(n_samples)) for i in range(n_features)]
-
-    # Gaussian elimination with partial pivoting
-    n = n_features
-    M = [XtX[i][:] + [Xty[i]] for i in range(n)]
-    for i in range(n):
-        max_row = i
-        for k in range(i + 1, n):
-            if abs(M[k][i]) > abs(M[max_row][i]):
-                max_row = k
-        M[i], M[max_row] = M[max_row], M[i]
-
-        pivot = M[i][i]
-        if abs(pivot) < 1e-12:
-            pivot = 1e-12 if pivot >= 0 else -1e-12
-
-        for j in range(i, n + 1):
-            M[i][j] /= pivot
-        for k in range(n):
-            if k != i:
-                factor = M[k][i]
-                for j in range(i, n + 1):
-                    M[k][j] -= factor * M[i][j]
-
-    return [M[i][n] for i in range(n)]
+    w = np.linalg.solve(XtX, Xty)
+    return w.tolist()
 
 
 class BaselineLSTMForecaster(BaseClimateForecaster):
     """
     Standard Single-Branch LSTM Baseline for time-series forecasting.
+    Vectorized batch recurrence with regularized closed-form linear projection.
     """
 
     def __init__(
@@ -77,13 +57,18 @@ class BaselineLSTMForecaster(BaseClimateForecaster):
         self.hidden_dim = hidden_dim
         self.lr = learning_rate
         self.seed = seed
-        random.seed(seed)
 
         self.input_dim = 1
         self.output_dim = 1
         self.lookback = 12
         self.weights: Dict[str, Any] = {}
         self.proj_weights: List[float] = []
+
+        # Packed NumPy arrays for vectorized recurrence
+        self._W: Optional[np.ndarray] = None
+        self._U: Optional[np.ndarray] = None
+        self._b: Optional[np.ndarray] = None
+        self._last_packed_weights_id: Optional[int] = None
 
     def _init_weights(self, input_dim: int, output_dim: int, lookback: int):
         self.input_dim = input_dim
@@ -95,50 +80,90 @@ class BaselineLSTMForecaster(BaseClimateForecaster):
         std_in = math.sqrt(2.0 / (I + H))
         std_h = math.sqrt(2.0 / (H + H))
 
+        random.seed(self.seed)
         for gate in ["i", "f", "c", "o"]:
             self.weights[f"W_{gate}"] = [[random.gauss(0, std_in * 0.4) for _ in range(H)] for _ in range(I)]
             self.weights[f"U_{gate}"] = [[random.gauss(0, std_h * 0.4) for _ in range(H)] for _ in range(H)]
             self.weights[f"b_{gate}"] = [0.0 if gate != "f" else 1.0 for _ in range(H)]
 
-    def _extract_hidden_features(self, seq: List[List[float]]) -> List[float]:
+        self._pack_weights()
+
+    def _pack_weights(self):
+        """Packs gate weights dictionary into contiguous NumPy arrays for vectorized recurrence."""
+        self._W = np.column_stack([
+            np.asarray(self.weights["W_i"], dtype=np.float64),
+            np.asarray(self.weights["W_f"], dtype=np.float64),
+            np.asarray(self.weights["W_c"], dtype=np.float64),
+            np.asarray(self.weights["W_o"], dtype=np.float64),
+        ])
+        self._U = np.column_stack([
+            np.asarray(self.weights["U_i"], dtype=np.float64),
+            np.asarray(self.weights["U_f"], dtype=np.float64),
+            np.asarray(self.weights["U_c"], dtype=np.float64),
+            np.asarray(self.weights["U_o"], dtype=np.float64),
+        ])
+        self._b = np.concatenate([
+            np.asarray(self.weights["b_i"], dtype=np.float64),
+            np.asarray(self.weights["b_f"], dtype=np.float64),
+            np.asarray(self.weights["b_c"], dtype=np.float64),
+            np.asarray(self.weights["b_o"], dtype=np.float64),
+        ])
+        self._last_packed_weights_id = id(self.weights)
+
+    def _ensure_packed_weights(self):
+        if self._W is None or self._last_packed_weights_id != id(self.weights):
+            self._pack_weights()
+
+    def _extract_hidden_features(self, seq: Union[List[List[float]], np.ndarray]) -> List[float]:
+        self._ensure_packed_weights()
+        seq_arr = np.asarray(seq, dtype=np.float64)
+        T = len(seq_arr)
         H = self.hidden_dim
-        I = self.input_dim
+        h = np.zeros(H, dtype=np.float64)
+        c = np.zeros(H, dtype=np.float64)
 
-        h = [0.0] * H
-        c = [0.0] * H
+        for t in range(T):
+            gates = np.dot(seq_arr[t], self._W) + np.dot(h, self._U) + self._b
+            z_i, z_f, z_c, z_o = np.split(gates, 4)
+            i_g = 1.0 / (1.0 + np.exp(-np.clip(z_i, -15.0, 15.0)))
+            f_g = 1.0 / (1.0 + np.exp(-np.clip(z_f, -15.0, 15.0)))
+            c_tilde = np.tanh(np.clip(z_c, -15.0, 15.0))
+            c = f_g * c + i_g * c_tilde
+            h = (1.0 / (1.0 + np.exp(-np.clip(z_o, -15.0, 15.0)))) * np.tanh(np.clip(c, -15.0, 15.0))
 
-        for x_t in seq:
-            h_next = [0.0] * H
-            c_next = [0.0] * H
-            for j in range(H):
-                z_i = sum(x_t[k] * self.weights["W_i"][k][j] for k in range(I)) + sum(h[k] * self.weights["U_i"][k][j] for k in range(H)) + self.weights["b_i"][j]
-                z_f = sum(x_t[k] * self.weights["W_f"][k][j] for k in range(I)) + sum(h[k] * self.weights["U_f"][k][j] for k in range(H)) + self.weights["b_f"][j]
-                z_c = sum(x_t[k] * self.weights["W_c"][k][j] for k in range(I)) + sum(h[k] * self.weights["U_c"][k][j] for k in range(H)) + self.weights["b_c"][j]
-                z_o = sum(x_t[k] * self.weights["W_o"][k][j] for k in range(I)) + sum(h[k] * self.weights["U_o"][k][j] for k in range(H)) + self.weights["b_o"][j]
-
-                i_g = sigmoid(z_i)
-                f_g = sigmoid(z_f)
-                c_tilde = tanh(z_c)
-                c_next[j] = f_g * c[j] + i_g * c_tilde
-                h_next[j] = sigmoid(z_o) * tanh(c_next[j])
-            h, c = h_next, c_next
-
-        # Feature vector: [1.0 (bias), target lag 0..T, hidden state 0..H]
-        feat = [1.0]
-        for step in seq:
-            feat.append(step[0])
-        feat.extend(h)
+        feat = [1.0] + seq_arr[:, 0].tolist() + h.tolist()
         return feat
+
+    def _extract_batch_hidden_features(self, X: Union[List[List[List[float]]], np.ndarray]) -> np.ndarray:
+        self._ensure_packed_weights()
+        X_arr = np.asarray(X, dtype=np.float64)
+        N, T, _ = X_arr.shape
+        H = self.hidden_dim
+        h = np.zeros((N, H), dtype=np.float64)
+        c = np.zeros((N, H), dtype=np.float64)
+
+        for t in range(T):
+            gates = np.dot(X_arr[:, t, :], self._W) + np.dot(h, self._U) + self._b
+            z_i, z_f, z_c, z_o = np.split(gates, 4, axis=1)
+            i_g = 1.0 / (1.0 + np.exp(-np.clip(z_i, -15.0, 15.0)))
+            f_g = 1.0 / (1.0 + np.exp(-np.clip(z_f, -15.0, 15.0)))
+            c_tilde = np.tanh(np.clip(z_c, -15.0, 15.0))
+            c = f_g * c + i_g * c_tilde
+            h = (1.0 / (1.0 + np.exp(-np.clip(z_o, -15.0, 15.0)))) * np.tanh(np.clip(c, -15.0, 15.0))
+
+        bias = np.ones((N, 1), dtype=np.float64)
+        lags = X_arr[:, :, 0]
+        return np.column_stack([bias, lags, h])
 
     def fit(
         self,
-        X_train: List[List[List[float]]],
-        y_train: List[List[float]],
+        X_train: Union[List[List[List[float]]], np.ndarray],
+        y_train: Union[List[List[float]], np.ndarray],
         epochs: int = 20,
         batch_size: int = 16,
         verbose: bool = False,
     ) -> Dict[str, Any]:
-        if not X_train:
+        if len(X_train) == 0:
             return {"loss_history": []}
 
         input_dim = len(X_train[0][0])
@@ -146,27 +171,24 @@ class BaselineLSTMForecaster(BaseClimateForecaster):
         lookback = len(X_train[0])
         self._init_weights(input_dim, output_dim, lookback)
 
-        # Extract features for all samples
-        H_mat = [self._extract_hidden_features(seq) for seq in X_train]
-        y_vec = [y[0] for y in y_train]
+        # Batch-vectorized feature extraction
+        H_mat = self._extract_batch_hidden_features(X_train)
+        y_vec = np.asarray(y_train, dtype=np.float64)[:, 0]
 
         # Solve optimal regularized projection
         self.proj_weights = solve_ridge_regression(H_mat, y_vec, lambda_reg=0.01)
 
         # Calculate train loss
-        preds = [sum(h_row[j] * self.proj_weights[j] for j in range(len(self.proj_weights))) for h_row in H_mat]
-        mse = sum((p - y) ** 2 for p, y in zip(preds, y_vec)) / len(y_vec)
+        preds = np.dot(H_mat, self.proj_weights)
+        mse = float(np.mean((preds - y_vec) ** 2))
 
         self.is_fitted = True
         return {"final_loss": round(mse, 5), "loss_history": [round(mse, 5)]}
 
-    def predict(self, X: List[List[List[float]]]) -> List[List[float]]:
+    def predict(self, X: Union[List[List[List[float]]], np.ndarray]) -> List[List[float]]:
         if not self.is_fitted:
             raise ValueError("Model must be fitted before calling predict().")
 
-        preds = []
-        for seq in X:
-            feat = self._extract_hidden_features(seq)
-            out_val = sum(feat[j] * self.proj_weights[j] for j in range(len(self.proj_weights)))
-            preds.append([out_val])
-        return preds
+        H_mat = self._extract_batch_hidden_features(X)
+        preds = np.dot(H_mat, self.proj_weights)
+        return [[float(p)] for p in preds]

@@ -3,44 +3,74 @@ Data loading, parsing, normalization, and sliding-window sequence generators for
 """
 
 import os
-import csv
-import math
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
+import numpy as np
+import pandas as pd
+
+
+class SlidingWindowArray(np.ndarray):
+    """
+    NumPy ndarray subclass providing Python container protocol compatibility
+    (truthiness and list equality) so unrefactored downstream modules work seamlessly.
+    """
+
+    def __new__(cls, input_array):
+        return np.asanyarray(input_array).view(cls)
+
+    def __bool__(self) -> bool:
+        if self.ndim == 0:
+            return bool(self.item())
+        return len(self) > 0
+
+    def __eq__(self, other):
+        if isinstance(other, (list, tuple)):
+            other_arr = np.asarray(other)
+            if self.shape != other_arr.shape:
+                return False
+            return bool(np.allclose(np.asarray(self), other_arr, atol=1e-9))
+        return super().__eq__(other)
 
 
 class MinMaxScaler:
-    """Feature normalization to [0, 1] range."""
+    """Feature normalization to [0, 1] range using NumPy vectorization."""
 
     def __init__(self, feature_range: Tuple[float, float] = (0.0, 1.0)):
         self.feature_range = feature_range
         self.min_val = 0.0
         self.max_val = 1.0
 
-    def fit(self, data: List[float]) -> "MinMaxScaler":
-        if not data:
+    def fit(self, data: Union[List[float], np.ndarray]) -> "MinMaxScaler":
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.size == 0:
             return self
-        self.min_val = min(data)
-        self.max_val = max(data)
+        self.min_val = float(np.min(arr))
+        self.max_val = float(np.max(arr))
         if self.min_val == self.max_val:
             self.max_val += 1e-6
         return self
 
-    def transform(self, data: List[float]) -> List[float]:
+    def transform(self, data: Union[List[float], np.ndarray]) -> SlidingWindowArray:
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.size == 0:
+            return SlidingWindowArray(np.array([], dtype=np.float64))
         r_min, r_max = self.feature_range
         scale = (r_max - r_min) / (self.max_val - self.min_val)
-        return [r_min + (x - self.min_val) * scale for x in data]
+        return SlidingWindowArray(r_min + (arr - self.min_val) * scale)
 
-    def fit_transform(self, data: List[float]) -> List[float]:
+    def fit_transform(self, data: Union[List[float], np.ndarray]) -> SlidingWindowArray:
         return self.fit(data).transform(data)
 
-    def inverse_transform(self, data: List[float]) -> List[float]:
+    def inverse_transform(self, data: Union[List[float], np.ndarray]) -> SlidingWindowArray:
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.size == 0:
+            return SlidingWindowArray(np.array([], dtype=np.float64))
         r_min, r_max = self.feature_range
         scale = (self.max_val - self.min_val) / (r_max - r_min)
-        return [self.min_val + (x - r_min) * scale for x in data]
+        return SlidingWindowArray(self.min_val + (arr - r_min) * scale)
 
 
 class ClimateDataLoader:
-    """Loads and formats meteorological datasets for training and forecasting."""
+    """Loads and formats meteorological datasets for training and forecasting using Pandas & NumPy."""
 
     @staticmethod
     def get_default_data_dir() -> str:
@@ -57,38 +87,35 @@ class ClimateDataLoader:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Dataset not found at: {path}")
 
-        dates, prec, nina, amm, soi, pdo, nao, amo = [], [], [], [], [], [], [], []
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        dates = df["Date"].astype(str).str.strip().tolist()
+        prec = df["Prec"].to_numpy(dtype=np.float64)
+        nina = df["NINA"].to_numpy(dtype=np.float64)
+        amm = df["AMM"].to_numpy(dtype=np.float64)
+        soi = df["SOI"].to_numpy(dtype=np.float64)
+        pdo = df["PDO"].to_numpy(dtype=np.float64)
+        nao = df["NAO"].to_numpy(dtype=np.float64)
+        amo = df["AMO"].to_numpy(dtype=np.float64)
 
-        with open(path, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                dates.append(row.get("Date", "").strip())
-                prec.append(float(row.get("Prec", 0.0)))
-                nina.append(float(row.get("NINA", 0.0)))
-                amm.append(float(row.get("AMM", 0.0)))
-                soi.append(float(row.get("SOI", 0.0)))
-                pdo.append(float(row.get("PDO", 0.0)))
-                nao.append(float(row.get("NAO", 0.0)))
-                amo.append(float(row.get("AMO", 0.0)))
-
-        N_pts = len(dates)
-        sin_month = [math.sin(2.0 * math.pi * (i % 12) / 12.0) for i in range(N_pts)]
-        cos_month = [math.cos(2.0 * math.pi * (i % 12) / 12.0) for i in range(N_pts)]
+        n_pts = len(dates)
+        month_indices = np.arange(n_pts) % 12
+        sin_month = np.sin(2.0 * np.pi * month_indices / 12.0)
+        cos_month = np.cos(2.0 * np.pi * month_indices / 12.0)
 
         return {
             "dates": dates,
-            "precipitation": prec,
+            "precipitation": SlidingWindowArray(prec),
             "features": {
-                "NINA": nina,
-                "AMM": amm,
-                "SOI": soi,
-                "PDO": pdo,
-                "NAO": nao,
-                "AMO": amo,
-                "sin_month": sin_month,
-                "cos_month": cos_month,
+                "NINA": SlidingWindowArray(nina),
+                "AMM": SlidingWindowArray(amm),
+                "SOI": SlidingWindowArray(soi),
+                "PDO": SlidingWindowArray(pdo),
+                "NAO": SlidingWindowArray(nao),
+                "AMO": SlidingWindowArray(amo),
+                "sin_month": SlidingWindowArray(sin_month),
+                "cos_month": SlidingWindowArray(cos_month),
             },
-            "total_records": len(dates),
+            "total_records": n_pts,
         }
 
     @classmethod
@@ -102,70 +129,81 @@ class ClimateDataLoader:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Station file not found: {path}")
 
-        dates, u10, v10, mx2t, mn2t, tp = [], [], [], [], [], []
-
-        with open(path, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                dates.append(row.get("Date", "").strip())
-                u10.append(float(row.get("u10", 0.0)))
-                v10.append(float(row.get("v10", 0.0)))
-                mx2t.append(float(row.get("mx2t", 300.0)))
-                mn2t.append(float(row.get("mn2t", 295.0)))
-                tp.append(float(row.get("tp", 0.0)))
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        dates = df["Date"].astype(str).str.strip().tolist()
+        u10 = df["u10"].to_numpy(dtype=np.float64) if "u10" in df else np.zeros(len(dates), dtype=np.float64)
+        v10 = df["v10"].to_numpy(dtype=np.float64) if "v10" in df else np.zeros(len(dates), dtype=np.float64)
+        mx2t = df["mx2t"].to_numpy(dtype=np.float64) if "mx2t" in df else np.full(len(dates), 300.0, dtype=np.float64)
+        mn2t = df["mn2t"].to_numpy(dtype=np.float64) if "mn2t" in df else np.full(len(dates), 295.0, dtype=np.float64)
+        tp = df["tp"].to_numpy(dtype=np.float64) if "tp" in df else np.zeros(len(dates), dtype=np.float64)
 
         return {
             "station": station,
             "dates": dates,
-            "precipitation": tp,
+            "precipitation": SlidingWindowArray(tp),
             "features": {
-                "u10": u10,
-                "v10": v10,
-                "mx2t": mx2t,
-                "mn2t": mn2t,
+                "u10": SlidingWindowArray(u10),
+                "v10": SlidingWindowArray(v10),
+                "mx2t": SlidingWindowArray(mx2t),
+                "mn2t": SlidingWindowArray(mn2t),
             },
             "total_records": len(dates),
         }
 
     @staticmethod
     def create_sliding_windows(
-        series: List[float],
-        exog_features: Optional[List[List[float]]] = None,
+        series: Union[List[float], np.ndarray],
+        exog_features: Optional[Union[List[List[float]], np.ndarray, List[np.ndarray]]] = None,
         lookback: int = 12,
         horizon: int = 1,
-    ) -> Tuple[List[List[List[float]]], List[List[float]]]:
+    ) -> Tuple[SlidingWindowArray, SlidingWindowArray]:
         """
-        Creates (X, Y) sliding window sequences for temporal neural network training.
-        X shape: [N_samples, lookback, num_features]
-        Y shape: [N_samples, horizon]
+        Creates (X, Y) sliding window sequences for temporal neural network training using NumPy strided windows.
+        X shape: (N_samples, lookback, num_features)
+        Y shape: (N_samples, horizon)
         """
-        N = len(series)
-        X, Y = [], []
+        s = np.asarray(series, dtype=np.float64)
+        N = len(s)
+        n_samples = N - lookback - horizon + 1
 
-        num_exog = len(exog_features) if exog_features else 0
+        if exog_features is not None and len(exog_features) > 0:
+            exog_arr = np.asarray(exog_features, dtype=np.float64)
+            if exog_arr.ndim == 2:
+                if exog_arr.shape[1] == N and exog_arr.shape[0] != N:
+                    exog_cols = exog_arr.T
+                elif exog_arr.shape[0] == N:
+                    exog_cols = exog_arr
+                else:
+                    raise ValueError(f"Exogenous features dimension {exog_arr.shape} does not match series length {N}")
+            elif exog_arr.ndim == 1:
+                if len(exog_arr) != N:
+                    raise ValueError(f"Exogenous feature length {len(exog_arr)} does not match series length {N}")
+                exog_cols = exog_arr[:, np.newaxis]
+            else:
+                raise ValueError(f"Exogenous features must be 1D or 2D, got shape {exog_arr.shape}")
+            full_data = np.column_stack([s, exog_cols])
+        else:
+            full_data = s[:, np.newaxis]
 
-        for i in range(N - lookback - horizon + 1):
-            # Target lag sequence
-            window_steps = []
-            for t in range(i, i + lookback):
-                step_features = [series[t]]
-                if exog_features:
-                    for ex in exog_features:
-                        step_features.append(ex[t])
-                window_steps.append(step_features)
+        num_features = full_data.shape[1]
 
-            target_steps = series[i + lookback : i + lookback + horizon]
-            X.append(window_steps)
-            Y.append(target_steps)
+        if n_samples <= 0:
+            return (
+                SlidingWindowArray(np.empty((0, lookback, num_features), dtype=np.float64)),
+                SlidingWindowArray(np.empty((0, horizon), dtype=np.float64)),
+            )
 
-        return X, Y
+        X = np.lib.stride_tricks.sliding_window_view(full_data, window_shape=lookback, axis=0).swapaxes(1, 2)[:n_samples].copy()
+        Y = np.lib.stride_tricks.sliding_window_view(s[lookback:], window_shape=horizon, axis=0)[:n_samples].copy()
+
+        return SlidingWindowArray(X), SlidingWindowArray(Y)
 
     @staticmethod
     def train_test_split(
-        X: List[Any], Y: List[Any], train_ratio: float = 0.8
-    ) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
+        X: Union[List[Any], np.ndarray],
+        Y: Union[List[Any], np.ndarray],
+        train_ratio: float = 0.8,
+    ) -> Tuple[Union[List[Any], np.ndarray], Union[List[Any], np.ndarray], Union[List[Any], np.ndarray], Union[List[Any], np.ndarray]]:
         """Temporal train-test split maintaining chronological order."""
         split_idx = int(len(X) * train_ratio)
-        X_train, Y_train = X[:split_idx], Y[:split_idx]
-        X_test, Y_test = X[split_idx:], Y[split_idx:]
-        return X_train, Y_train, X_test, Y_test
+        return X[:split_idx], Y[:split_idx], X[split_idx:], Y[split_idx:]
